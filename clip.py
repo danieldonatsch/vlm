@@ -560,9 +560,9 @@ if __name__ == '__main__':
         help='held-out examples per combination in prediction/heatmap plots',
     )
     parser.add_argument('--image-size', type=int, default=64)
-    parser.add_argument('--image-dim', type=int, default=64)
-    parser.add_argument('--text-dim', type=int, default=64)
-    parser.add_argument('--shared-dim', type=int, default=32)
+    parser.add_argument('--image-dim', type=int, default=64, help='image dimension')
+    parser.add_argument('--text-dim', type=int, default=64, help='text embedding dimension')
+    parser.add_argument('--shared-dim', type=int, default=32, help='shared embedding dimension')
     parser.add_argument('--samples-per-combination', type=int, default=500)
     parser.add_argument('--test-samples-per-combination', type=int, default=100)
     parser.add_argument('--batch-size', type=int, default=128)

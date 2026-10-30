@@ -73,6 +73,20 @@ def make_vocabulary(include_position=False) -> dict:
     return {word: index for index, word in enumerate(words)}
 
 
+def make_caption_vocabulary(include_position=False) -> dict:
+    """Same as make_vocabulary() plus the <bos> and <eos> tokens needed for caption generation.
+
+    The special tokens are appended, so all other indices match make_vocabulary().
+
+    :param include_position: (bool) whether position words are part of the vocabulary
+    :return: dict(str: int) Dictionary mapping words to indices.
+    """
+    vocabulary = make_vocabulary(include_position)
+    for word in ('<bos>', '<eos>'):
+        vocabulary[word] = len(vocabulary)
+    return vocabulary
+
+
 def tokenize(caption: str, vocabulary) -> torch.Tensor:
     """Takes a caption, splits it into words and gets for each word the token id.
 
