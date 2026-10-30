@@ -100,6 +100,51 @@ def tokenize(caption: str, vocabulary) -> torch.Tensor:
     )
 
 
+def draw_shape(draw, shape, color, center_x, center_y, object_size):
+    """Draws one filled shape of the given size, centered at (center_x, center_y).
+
+    :param draw: (ImageDraw.Draw) drawing context of the image
+    :param shape: (str) one of SHAPES
+    :param color: (str) one of COLORS (any PIL color name works)
+    :param center_x: (int) x coordinate of the center in pixels
+    :param center_y: (int) y coordinate of the center in pixels
+    :param object_size: (int) width and height of the shape's bounding box in pixels
+    """
+    left = center_x - object_size // 2
+    top = center_y - object_size // 2
+    right = left + object_size
+    bottom = top + object_size
+
+    if shape == 'circle':
+        draw.ellipse((left, top, right, bottom), fill=color)
+    elif shape == 'square':
+        draw.rectangle((left, top, right, bottom), fill=color)
+    elif shape == 'triangle':
+        draw.polygon(
+            ((center_x, top), (left, bottom), (right, bottom)),
+            fill=color,
+        )
+    elif shape in ('hexagon', 'star'):
+        outer_radius = object_size / 2
+        inner_radius = outer_radius * 0.45
+        n_points = 6 if shape == 'hexagon' else 5
+        points = []
+        for point_index in range(n_points * (1 if shape == 'hexagon' else 2)):
+            angle_step = (2 * math.pi / n_points
+                          if shape == 'hexagon' else math.pi / n_points)
+            angle = -math.pi / 2 + point_index * angle_step
+            radius = outer_radius
+            if shape == 'star' and point_index % 2:
+                radius = inner_radius
+            points.append((
+                center_x + radius * math.cos(angle),
+                center_y + radius * math.sin(angle),
+            ))
+        draw.polygon(points, fill=color)
+    else:
+        raise ValueError(f'Unsupported shape: {shape}')
+
+
 class ShapeDataset(Dataset):
     """Generate varied images for a fixed set of color-shape combinations."""
 
@@ -138,39 +183,7 @@ class ShapeDataset(Dataset):
         half_object = object_size // 2
         center_x = max(half_object, min(size - half_object, center_x))
         center_y = max(half_object, min(size - half_object, center_y))
-        left = center_x - object_size // 2
-        top = center_y - object_size // 2
-        right = left + object_size
-        bottom = top + object_size
-
-        if shape == 'circle':
-            draw.ellipse((left, top, right, bottom), fill=color)
-        elif shape == 'square':
-            draw.rectangle((left, top, right, bottom), fill=color)
-        elif shape == 'triangle':
-            draw.polygon(
-                ((center_x, top), (left, bottom), (right, bottom)),
-                fill=color,
-            )
-        elif shape in ('hexagon', 'star'):
-            outer_radius = object_size / 2
-            inner_radius = outer_radius * 0.45
-            n_points = 6 if shape == 'hexagon' else 5
-            points = []
-            for point_index in range(n_points * (1 if shape == 'hexagon' else 2)):
-                angle_step = (2 * math.pi / n_points
-                              if shape == 'hexagon' else math.pi / n_points)
-                angle = -math.pi / 2 + point_index * angle_step
-                radius = outer_radius
-                if shape == 'star' and point_index % 2:
-                    radius = inner_radius
-                points.append((
-                    center_x + radius * math.cos(angle),
-                    center_y + radius * math.sin(angle),
-                ))
-            draw.polygon(points, fill=color)
-        else:
-            raise ValueError(f'Unsupported shape: {shape}')
+        draw_shape(draw, shape, color, center_x, center_y, object_size)
         return image
 
 
