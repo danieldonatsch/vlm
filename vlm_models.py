@@ -90,6 +90,30 @@ class SpatialImageEncoder(nn.Module):
                 getattr(self, name).eval()
         return self
 
+    def token_grid_extent(self, image_size) -> tuple:
+        """Returns the pixel range (start, end), in x and in y, to which the grid of visual tokens corresponds.
+
+        Each token is placed at the center of its receptive field. Because the convs use no padding,
+        the token grid does not cover the image evenly: e.g. for 128 px images and a 4x4 grid the token
+        centers are at about 24, 48, 72 and 96 px.
+        """
+        # Center of the first conv output (offset) and distance between neighboring outputs (jump), in pixels
+        offset, jump, size = 0.0, 1, image_size
+        for conv in (self.conv0, self.conv1, self.conv2, self.conv3):
+            kernel_size, stride = conv.kernel_size[0], conv.stride[0]
+            offset += (kernel_size - 1) / 2 * jump
+            jump *= stride
+            size = (size - kernel_size) // stride + 1
+        # AdaptiveAvgPool2d averages bin j over the conv outputs floor(j * size / grid) to ceil((j + 1) * size / grid)
+        grid_size = self.pool.output_size if isinstance(self.pool.output_size, int) else self.pool.output_size[0]
+        centers = []
+        for j in range(grid_size):
+            start, end = (j * size) // grid_size, -((-(j + 1) * size) // grid_size)
+            # + 0.5: center of the pixel
+            centers.append(offset + 0.5 + jump * (start + end - 1) / 2)
+        spacing = centers[1] - centers[0] if grid_size > 1 else size * jump
+        return centers[0] - spacing / 2, centers[-1] + spacing / 2
+
     def forward(self, x):
         """Returns visual tokens of shape (B, grid_size * grid_size, out_channels)."""
         for conv, bn in ((self.conv0, self.bn0), (self.conv1, self.bn1),
@@ -213,8 +237,8 @@ class CaptionDecoder(nn.Module):
         self.max_length = max_length
         self.n_image_tokens = n_image_tokens
 
-    def forward(self, image_features, input_ids):
-        """Returns next-token logits of shape (B, T, vocab_size) for input_ids of shape (B, T).
+    def embed(self, image_features, input_ids) -> tuple:
+        """Returns the transformer input (visual tokens followed by caption tokens) and the attention mask.
 
         image_features has shape (B, D) for one visual token or (B, n_image_tokens, D).
         """
@@ -227,9 +251,39 @@ class CaptionDecoder(nn.Module):
         mask = nn.Transformer.generate_square_subsequent_mask(x.size(1), device=x.device)
         # The visual tokens may attend to each other (for one token this changes nothing)
         mask[:self.n_image_tokens, :self.n_image_tokens] = 0.0
+        return x, mask
+
+    def forward(self, image_features, input_ids):
+        """Returns next-token logits of shape (B, T, vocab_size) for input_ids of shape (B, T).
+
+        image_features has shape (B, D) for one visual token or (B, n_image_tokens, D).
+        """
+        x, mask = self.embed(image_features, input_ids)
         x = self.transformer(x, mask=mask)
         # Drop the image positions: output i predicts the token following input_ids[:, i]
         return self.output(self.norm(x[:, self.n_image_tokens:]))
+
+    @torch.no_grad()
+    def attention_maps(self, image_features, input_ids) -> list:
+        """Returns the attention weights of every layer, for analysis only (call in eval mode).
+
+        nn.TransformerEncoderLayer computes its attention with need_weights=False, so the weights are
+        computed here a second time, with the same inputs, by calling the layer's attention module directly.
+
+        :return: (list) one tensor per layer of shape (B, n_heads, L, L) with L = n_image_tokens + T.
+            Entry [b, h, i, j] is how much position i attends to position j.
+        """
+        x, mask = self.embed(image_features, input_ids)
+        maps = []
+        for layer in self.transformer.layers:
+            # norm_first=True: the attention sees the normalized layer input
+            h = layer.norm1(x)
+            _, weights = layer.self_attn(
+                h, h, h, attn_mask=mask, need_weights=True, average_attn_weights=False,
+            )
+            maps.append(weights)
+            x = layer(x, src_mask=mask)
+        return maps
 
     @torch.no_grad()
     def generate(self, image_features, bos_id, eos_id):

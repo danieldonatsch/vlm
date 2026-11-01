@@ -1,4 +1,6 @@
 
 # Output directories
-res_cl
+out_captioner
 out_clip
+out_multi_captioner
+res_cl

@@ -125,6 +125,52 @@ def create_image_encoder(args, device, log_file) -> SpatialImageEncoder:
     return image_encoder
 
 
+def create_datasets(args, train_objects, held_out_objects) -> tuple:
+    """Returns the training, train-evaluation and held-out test data sets.
+
+    :return: (tuple) train data set, train-evaluation data set, test data set
+    """
+    train_dataset = ms.MultiShapeDataset(
+        train_objects, args.train_samples, image_size=args.image_size, seed=args.seed,
+    )
+    # Fresh images with training objects only, to compare against images with a held-out object
+    train_eval_dataset = ms.MultiShapeDataset(
+        train_objects, args.test_samples, image_size=args.image_size, seed=args.seed + 200000,
+    )
+    # Every test image contains one held-out object and one training object
+    test_dataset = ms.MultiShapeDataset(
+        train_objects, args.test_samples, image_size=args.image_size, seed=args.seed + 100000,
+        required_objects=held_out_objects,
+    )
+    return train_dataset, train_eval_dataset, test_dataset
+
+
+def create_decoder(args, vocabulary, image_encoder) -> CaptionDecoder:
+    """Creates the caption decoder matching the image encoder's visual tokens."""
+    return CaptionDecoder(
+        len(vocabulary), image_encoder.latent_dim, d_model=args.d_model, n_heads=args.n_heads,
+        n_layers=args.n_layers, max_length=ms.MAX_CAPTION_WORDS + 1, dropout=args.dropout,
+        padding_idx=vocabulary['<pad>'], n_image_tokens=image_encoder.n_tokens,
+    )
+
+
+def load_multi_captioner(checkpoint_path, device) -> tuple:
+    """Loads a checkpoint written by this script.
+
+    :return: (tuple) image encoder, decoder (both in eval mode), vocabulary, config (argparse.Namespace)
+    """
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    config = argparse.Namespace(**checkpoint['config'])
+    vocabulary = checkpoint['vocabulary']
+    image_encoder = SpatialImageEncoder(
+        img_channels=3, out_channels=config.encoder_channels, grid_size=config.grid_size,
+    ).to(device)
+    image_encoder.load_state_dict(checkpoint['image_encoder'])
+    decoder = create_decoder(config, vocabulary, image_encoder).to(device)
+    decoder.load_state_dict(checkpoint['decoder'])
+    return image_encoder.eval(), decoder.eval(), vocabulary, config
+
+
 def main(args):
     """Train the spatial image encoder and the caption decoder and evaluate them on held-out objects."""
     torch.manual_seed(args.seed)
@@ -141,18 +187,7 @@ def main(args):
     collate_fn = lambda batch: collate_shape_batch(
         [(image, f'<bos> {caption} <eos>') for image, caption in batch], vocabulary
     )
-    train_dataset = ms.MultiShapeDataset(
-        train_objects, args.train_samples, image_size=args.image_size, seed=args.seed,
-    )
-    # Fresh images with training objects only, to compare against images with a held-out object
-    train_eval_dataset = ms.MultiShapeDataset(
-        train_objects, args.test_samples, image_size=args.image_size, seed=args.seed + 200000,
-    )
-    # Every test image contains one held-out object and one training object
-    test_dataset = ms.MultiShapeDataset(
-        train_objects, args.test_samples, image_size=args.image_size, seed=args.seed + 100000,
-        required_objects=held_out_objects,
-    )
+    train_dataset, train_eval_dataset, test_dataset = create_datasets(args, train_objects, held_out_objects)
     plot_dataset_examples(
         train_dataset, test_dataset, args.visual_examples, os.path.join(run_directory, 'dataset_examples.png')
     )
@@ -164,11 +199,7 @@ def main(args):
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, collate_fn=collate_fn)
 
     image_encoder = create_image_encoder(args, device, log_file)
-    decoder = CaptionDecoder(
-        len(vocabulary), image_encoder.latent_dim, d_model=args.d_model, n_heads=args.n_heads,
-        n_layers=args.n_layers, max_length=ms.MAX_CAPTION_WORDS + 1, dropout=args.dropout,
-        padding_idx=vocabulary['<pad>'], n_image_tokens=image_encoder.n_tokens,
-    ).to(device)
+    decoder = create_decoder(args, vocabulary, image_encoder).to(device)
     # Frozen pretrained layers have requires_grad == False
     parameters = [p for p in (*image_encoder.parameters(), *decoder.parameters()) if p.requires_grad]
     log_message(log_file, f'Visual tokens per image: {image_encoder.n_tokens}')
