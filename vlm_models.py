@@ -204,6 +204,9 @@ class CaptionDecoder(nn.Module):
 
     Several visual tokens (e.g. from SpatialImageEncoder) are handled the same way: [IMG_1] ... [IMG_N] <bos> ...
     The visual tokens see each other, the caption tokens see all visual tokens and the tokens before them.
+
+    For question answering, the text starts with a prompt, e.g. "<bos> what color is the star ? <ans>",
+    and generate() continues after it. <pad> tokens (e.g. to align prompts of different lengths) are never attended to.
     """
 
     def __init__(self, vocab_size, image_dim, d_model=64, n_heads=4, n_layers=2,
@@ -214,7 +217,7 @@ class CaptionDecoder(nn.Module):
         :param d_model: width of the transformer
         :param n_heads: number of attention heads
         :param n_layers: number of transformer layers
-        :param max_length: maximum number of caption tokens (incl. <bos>)
+        :param max_length: maximum number of text tokens fed to the decoder (incl. <bos> and a prompt)
         :param dropout: dropout probability inside the transformer
         :param padding_idx: index of the <pad> token
         :param n_image_tokens: number of visual tokens per image
@@ -238,9 +241,12 @@ class CaptionDecoder(nn.Module):
         self.n_image_tokens = n_image_tokens
 
     def embed(self, image_features, input_ids) -> tuple:
-        """Returns the transformer input (visual tokens followed by caption tokens) and the attention mask.
+        """Returns the transformer input (visual tokens followed by caption tokens) and the attention masks.
 
         image_features has shape (B, D) for one visual token or (B, n_image_tokens, D).
+
+        :return: (tuple) input x of shape (B, L, d_model), attention mask (L, L), and padding mask (B, L)
+            which blocks attention to <pad> tokens (None if input_ids contains no <pad>)
         """
         if image_features.dim() == 2:
             image_features = image_features.unsqueeze(1)
@@ -251,15 +257,21 @@ class CaptionDecoder(nn.Module):
         mask = nn.Transformer.generate_square_subsequent_mask(x.size(1), device=x.device)
         # The visual tokens may attend to each other (for one token this changes nothing)
         mask[:self.n_image_tokens, :self.n_image_tokens] = 0.0
-        return x, mask
+        padding = input_ids == self.token_embedding.padding_idx
+        padding_mask = None
+        if padding.any():
+            # Same type as mask (float, -inf = blocked); the visual tokens are never padding
+            padding_mask = torch.zeros(x.shape[:2], device=x.device)
+            padding_mask[:, self.n_image_tokens:] = padding.float().masked_fill(padding, float('-inf'))
+        return x, mask, padding_mask
 
     def forward(self, image_features, input_ids):
         """Returns next-token logits of shape (B, T, vocab_size) for input_ids of shape (B, T).
 
         image_features has shape (B, D) for one visual token or (B, n_image_tokens, D).
         """
-        x, mask = self.embed(image_features, input_ids)
-        x = self.transformer(x, mask=mask)
+        x, mask, padding_mask = self.embed(image_features, input_ids)
+        x = self.transformer(x, mask=mask, src_key_padding_mask=padding_mask)
         # Drop the image positions: output i predicts the token following input_ids[:, i]
         return self.output(self.norm(x[:, self.n_image_tokens:]))
 
@@ -273,27 +285,35 @@ class CaptionDecoder(nn.Module):
         :return: (list) one tensor per layer of shape (B, n_heads, L, L) with L = n_image_tokens + T.
             Entry [b, h, i, j] is how much position i attends to position j.
         """
-        x, mask = self.embed(image_features, input_ids)
+        x, mask, padding_mask = self.embed(image_features, input_ids)
         maps = []
         for layer in self.transformer.layers:
             # norm_first=True: the attention sees the normalized layer input
             h = layer.norm1(x)
             _, weights = layer.self_attn(
-                h, h, h, attn_mask=mask, need_weights=True, average_attn_weights=False,
+                h, h, h, attn_mask=mask, key_padding_mask=padding_mask,
+                need_weights=True, average_attn_weights=False,
             )
             maps.append(weights)
-            x = layer(x, src_mask=mask)
+            x = layer(x, src_mask=mask, src_key_padding_mask=padding_mask)
         return maps
 
     @torch.no_grad()
-    def generate(self, image_features, bos_id, eos_id):
-        """Greedy decoding. Returns generated token ids (B, <= max_length) without the <bos> token."""
+    def generate(self, image_features, prompt, eos_id):
+        """Greedy decoding, continuing after the prompt.
+
+        :param prompt: (int | torch.Tensor) the <bos> id (captioning), or prompt token ids of shape (B, P),
+            e.g. "<bos> what color is the star ? <ans>". Prompts of different lengths must be padded on the
+            left with <pad>, so that all of them end at the same position.
+        :return: (torch.Tensor) generated token ids (B, <= max_length - P + 1), without the prompt
+        """
         batch_size = image_features.size(0)
-        token_ids = torch.full(
-            (batch_size, 1), bos_id, dtype=torch.long, device=image_features.device
-        )
+        if isinstance(prompt, int):
+            prompt = torch.full((batch_size, 1), prompt, dtype=torch.long, device=image_features.device)
+        token_ids = prompt
         finished = torch.zeros(batch_size, dtype=torch.bool, device=image_features.device)
-        for _ in range(self.max_length):
+        # The last generated token is never fed back, so at most max_length tokens are fed to the decoder
+        for _ in range(self.max_length - prompt.size(1) + 1):
             next_ids = self(image_features, token_ids)[:, -1].argmax(dim=-1)
             # Captions which are already finished just keep on producing <eos>
             next_ids = next_ids.masked_fill(finished, eos_id)
@@ -301,4 +321,4 @@ class CaptionDecoder(nn.Module):
             finished |= next_ids == eos_id
             if finished.all():
                 break
-        return token_ids[:, 1:]
+        return token_ids[:, prompt.size(1):]

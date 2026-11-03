@@ -79,6 +79,10 @@ def predict_captions(image_encoder, image_projection, decoder, loader, vocabular
 def train_epoch(image_encoder, image_projection, decoder, loader, optimizer, pad_id, train_encoder, device) -> float:
     """Trains the decoder (and the encoder if train_encoder is True) for one epoch.
 
+    The loader yields either (images, token_ids) for captioning, or (images, input_ids, target_ids)
+    if the collate function prepares the targets itself, e.g. for question answering, where only the
+    answer is learned and all prompt targets are set to <pad>.
+
     :param train_encoder: (bool) If False, the encoder is kept in eval mode and gets no gradients.
     :return: (float) mean loss per sample
     """
@@ -89,17 +93,20 @@ def train_epoch(image_encoder, image_projection, decoder, loader, optimizer, pad
         image_projection.train(train_encoder)
     total_loss, n_samples = 0.0, 0
 
-    for images, token_ids in loader:
-        images = images.to(device)
-        token_ids = token_ids.to(device)
-        # Teacher forcing: input is [<bos>, w1, w2], target is [w1, w2, <eos>]
-        input_ids = token_ids[:, :-1]
-        target_ids = token_ids[:, 1:]
+    for batch in loader:
+        images = batch[0].to(device)
+        if len(batch) == 2:
+            # Teacher forcing: input is [<bos>, w1, w2], target is [w1, w2, <eos>]
+            input_ids, target_ids = batch[1][:, :-1], batch[1][:, 1:]
+        else:
+            input_ids, target_ids = batch[1], batch[2]
+        input_ids, target_ids = input_ids.to(device), target_ids.to(device)
         with torch.set_grad_enabled(train_encoder):
             image_features = encode_images(image_encoder, image_projection, images)
         logits = decoder(image_features, input_ids)
         loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)), target_ids.reshape(-1),
+            # <pad> targets (padding, and prompts for question answering) get no loss
             ignore_index=pad_id,
         )
 
@@ -150,15 +157,16 @@ def log_wrong_predictions(log_file, wrong_examples, max_lines=None):
         log_message(log_file, f'- {target} -> {prediction}: {count}')
 
 
-def plot_examples(dataset, targets, predictions, n_examples, figure_name, seed=0) -> None:
+def plot_examples(dataset, targets, predictions, n_examples, figure_name, seed=0, prompts=None) -> None:
     """Saves a figure with randomly chosen correct (top row) and wrong (bottom row) predictions.
 
-    :param dataset: (Dataset) The data set the predictions were made on (not shuffled).
+    :param dataset: (Dataset) The data set the predictions were made on (not shuffled); item [0] is the image.
     :param targets: (list) True captions, in the same order as the data set.
     :param predictions: (list) Generated captions, in the same order as the data set.
     :param n_examples: (int) Maximum number of examples per row.
     :param figure_name: (str) File name of the figure.
     :param seed: (int) Random seed for choosing the examples.
+    :param prompts: (list | None) Questions, in the same order as the data set; shown above the answers.
     """
     correct = [index for index, (t, p) in enumerate(zip(targets, predictions)) if t == p]
     wrong = [index for index, (t, p) in enumerate(zip(targets, predictions)) if t != p]
@@ -170,10 +178,11 @@ def plot_examples(dataset, targets, predictions, n_examples, figure_name, seed=0
     figure, axes = plt.subplots(2, n_examples, figsize=(3 * n_examples, 6.5), squeeze=False)
     for row_axes, indices in zip(axes, rows):
         for axis, index in zip(row_axes, indices):
-            image, _ = dataset[index]
+            image = dataset[index][0]
             axis.imshow(image.permute(1, 2, 0))
+            prompt = '' if prompts is None else f'{prompts[index]}\n'
             axis.set_title(
-                f'True: {targets[index]}\nPredicted: {predictions[index]}',
+                f'{prompt}True: {targets[index]}\nPredicted: {predictions[index]}',
                 color='green' if targets[index] == predictions[index] else 'red',
                 fontsize=9,
             )

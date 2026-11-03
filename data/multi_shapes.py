@@ -50,7 +50,7 @@ class MultiShapeDataset(Dataset):
     Every sample is generated from its own seed, so the data set is deterministic.
     """
 
-    def __init__(self, objects, n_samples, image_size=128, seed=0, required_objects=None):
+    def __init__(self, objects, n_samples, image_size=128, seed=0, required_objects=None, same_color_fraction=0.0):
         """
         :param objects: (tuple) (color, shape) combinations the objects are drawn from
         :param n_samples: (int) number of images in the data set
@@ -58,12 +58,16 @@ class MultiShapeDataset(Dataset):
         :param seed: (int) random seed
         :param required_objects: (tuple | None) if given, one of the two objects (on a random side)
             is drawn from required_objects instead of objects. Used for the held-out test set.
+        :param same_color_fraction: (float) fraction of the images in which the second object gets the same color
+            as the first one (but a different shape). Without it (0.0), both objects are chosen independently,
+            and only about 15% of the images contain two objects of the same color.
         """
         self.objects = objects
         self.n_samples = n_samples
         self.image_size = image_size
         self.seed = seed
         self.required_objects = required_objects
+        self.same_color_fraction = same_color_fraction
         self.to_tensor = transforms.ToTensor()
 
     def __len__(self):
@@ -72,13 +76,19 @@ class MultiShapeDataset(Dataset):
     def __getitem__(self, index):
         rng = random.Random(self.seed + index)
         if self.required_objects is None:
-            left_object, right_object = rng.choice(self.objects), rng.choice(self.objects)
+            first_object, second_object = rng.choice(self.objects), rng.choice(self.objects)
+            first_on_left = True
         else:
-            required_object, other_object = rng.choice(self.required_objects), rng.choice(self.objects)
-            if rng.random() < 0.5:
-                left_object, right_object = required_object, other_object
-            else:
-                left_object, right_object = other_object, required_object
+            first_object, second_object = rng.choice(self.required_objects), rng.choice(self.objects)
+            first_on_left = rng.random() < 0.5
+        # Only draws an extra random number if the option is used, so the images without it stay the same
+        if self.same_color_fraction and rng.random() < self.same_color_fraction:
+            second_object = rng.choice([
+                obj for obj in self.objects if obj[0] == first_object[0] and obj[1] != first_object[1]
+            ])
+        left_object, right_object = (
+            (first_object, second_object) if first_on_left else (second_object, first_object)
+        )
         image = self.make_image(left_object, right_object, seed=rng.randint(0, 2 ** 31))
         return self.to_tensor(image), make_caption(left_object, right_object)
 

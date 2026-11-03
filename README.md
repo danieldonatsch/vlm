@@ -43,3 +43,27 @@ python train_multi_captioner.py
 ```
 
 Shared helpers of both captioning scripts are in `captioning.py`.
+
+## Visual question answering
+
+`train_vqa.py` trains a decoder to answer questions about the two-shape images (data set in `data/vqa_shapes.py`),
+e.g. "what color is the star ?" -> "magenta" or "what is left of the green square ?" -> "blue star".
+The decoder input is the image tokens, the question as prompt, and the answer:
+`<pad> ... <bos> what color is the star ? <ans> magenta <eos>`.
+The loss is computed on the answer only. The image encoder comes from a `train_multi_captioner.py` checkpoint
+and is frozen by default.
+Besides the accuracy per question type, the "blind" accuracy (with empty images) shows how many answers
+can be guessed from the question alone.
+
+```
+python train_vqa.py --plot-dataset-only                     # check questions and answers
+python train_vqa.py --checkpoint-path out_multi_captioner/<run>/captioner_epoch_020.pt
+python train_vqa.py --question-types color shape            # only some question types
+```
+
+Location questions can be answered by finding the object's color only, unless both objects have the same color
+("location same color" in the log). `--same-color-fraction 0.4` makes such images more frequent in training:
+```
+python train_vqa.py --same-color-fraction 0.4
+python train_vqa.py --resume-from out_vqa/<run>/captioner_epoch_100.pt --same-color-fraction 0.4 --epochs 20
+```
